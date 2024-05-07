@@ -1,2 +1,2 @@
-# MicroCommunity
+# micro-community
 智慧社区
