@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="myUserServiceDaoImpl">
+
+    <!-- 查询租赁预约信息 add by wuxw 2018-07-03 -->
+    <select id="queryMyUser" parameterType="Map" resultType="Map">
+        select * from my_user
+    </select>
+
+    <!-- 查询租赁预约数量 add by wuxw 2018-07-03 -->
+    <select id="queryMyUsersCount" parameterType="Map" resultType="Map">
+        select count(1) count
+        from my_user t
+        where 1 =1
+    </select>
+
+</mapper>

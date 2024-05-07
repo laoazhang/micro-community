@@ -1,0 +1,92 @@
+server:
+  port: 8006
+  tomcat:
+    uri-encoding: UTF-8
+
+
+
+spring:
+  #允许Bean覆盖
+  main:
+    allow-bean-definition-overriding: true
+  cloud: #注册到Nacos
+    nacos:
+      discovery:
+        server-addr: 127.0.0.1:8848
+  http:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+  application:
+    name: store-service
+  redis:
+    database: 0
+    host: dev.redis.java110.com
+    port: 6379
+    password: 123456
+    pool:
+      max-active: 300
+      max-wait: 10000
+      max-idle: 100
+      min-idle: 0
+      timeout: 0
+  datasource:
+    connectionProperties: druid.stat.mergeSql=true;druid.stat.slowSqlMillis=5000
+    minIdle: 5
+    validationQuery: SELECT 1 FROM DUAL
+    initialSize: 5
+    maxWait: 60000
+    filters: stat,wall,log4j
+    poolPreparedStatements: true
+    type: com.alibaba.druid.pool.DruidDataSource
+    url: jdbc:mysql://dev.db.java110.com:3306/TT?useUnicode=true&characterEncoding=utf-8
+    maxPoolPreparedStatementPerConnectionSize: 20
+    password: 123456
+    testOnBorrow: false
+    testWhileIdle: true
+    minEvictableIdleTimeMillis: 300000
+    timeBetweenEvictionRunsMillis: 60000
+    testOnReturn: false
+    driverClassName: com.mysql.cj.jdbc.Driver
+    maxActive: 20
+    username: root
+
+feign:
+  client:
+    config:
+      default:
+        connect-timeout: 10000
+        read-timeout: 20000
+
+#============== kafka ===================
+kafka:
+  consumer:
+    zookeeper:
+      connect: dev.zk.java110.com:2181
+    servers: dev.kafka.java110.com:9092
+    enable:
+      auto:
+        commit: true
+    session:
+      timeout: 6000
+    auto:
+      commit:
+        interval: 100
+      offset:
+        reset: latest
+    topic: test
+    group:
+      id: storeBusinessStatus
+    concurrency: 10
+
+  producer:
+    zookeeper:
+      connect: dev.zk.java110.com:2181
+    servers: dev.kafka.java110.com:9092
+    retries: 0
+    batch:
+      size: 4096
+    linger: 1
+    buffer:
+      memory: 40960

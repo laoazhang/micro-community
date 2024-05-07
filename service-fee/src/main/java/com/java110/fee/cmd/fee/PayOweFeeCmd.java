@@ -1,0 +1,396 @@
+package com.java110.fee.cmd.fee;
+
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
+import com.java110.core.annotation.Java110Cmd;
+import com.java110.core.annotation.Java110Transactional;
+import com.java110.core.context.ICmdDataFlowContext;
+import com.java110.core.event.cmd.Cmd;
+import com.java110.core.event.cmd.CmdEvent;
+import com.java110.core.factory.GenerateCodeFactory;
+import com.java110.core.factory.Java110TransactionalFactory;
+import com.java110.core.log.LoggerFactory;
+import com.java110.core.smo.IComputeFeeSMO;
+import com.java110.dto.app.AppDto;
+import com.java110.dto.fee.FeeAttrDto;
+import com.java110.dto.fee.FeeConfigDto;
+import com.java110.dto.fee.FeeDetailDto;
+import com.java110.dto.fee.FeeDto;
+import com.java110.dto.fee.FeeReceiptDetailDto;
+import com.java110.dto.owner.OwnerCarDto;
+import com.java110.dto.owner.OwnerDto;
+import com.java110.dto.parking.ParkingSpaceDto;
+import com.java110.dto.user.UserDto;
+import com.java110.intf.community.*;
+import com.java110.intf.fee.*;
+import com.java110.intf.user.IOwnerCarInnerServiceSMO;
+import com.java110.intf.user.IUserV1InnerServiceSMO;
+import com.java110.po.car.OwnerCarPo;
+import com.java110.po.fee.PayFeeDetailPo;
+import com.java110.po.fee.PayFeePo;
+import com.java110.po.feeReceipt.FeeReceiptPo;
+import com.java110.po.feeReceiptDetail.FeeReceiptDetailPo;
+import com.java110.po.owner.RepairPoolPo;
+import com.java110.po.owner.RepairUserPo;
+import com.java110.utils.constant.ResponseConstant;
+import com.java110.utils.exception.CmdException;
+import com.java110.utils.exception.ListenerExecuteException;
+import com.java110.utils.util.Assert;
+import com.java110.utils.util.BeanConvertUtil;
+import com.java110.utils.util.DateUtil;
+import com.java110.utils.util.StringUtil;
+import com.java110.vo.ResultVo;
+import org.slf4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.math.BigDecimal;
+import java.text.ParseException;
+import java.util.*;
+
+@Java110Cmd(serviceCode = "fee.payOweFee")
+public class PayOweFeeCmd extends Cmd {
+    private static Logger logger = LoggerFactory.getLogger(PayOweFeeCmd.class);
+    @Autowired
+    private IParkingSpaceInnerServiceSMO parkingSpaceInnerServiceSMOImpl;
+    @Autowired
+    private IFeeInnerServiceSMO feeInnerServiceSMOImpl;
+
+    @Autowired
+    private IFeeAttrInnerServiceSMO feeAttrInnerServiceSMOImpl;
+
+    @Autowired
+    private IRoomInnerServiceSMO roomInnerServiceSMOImpl;
+
+    @Autowired
+    private IFeeConfigInnerServiceSMO feeConfigInnerServiceSMOImpl;
+
+    @Autowired
+    private IFeeReceiptInnerServiceSMO feeReceiptInnerServiceSMOImpl;
+
+    @Autowired
+    private IFeeReceiptDetailInnerServiceSMO feeReceiptDetailInnerServiceSMOImpl;
+
+    @Autowired
+    private IPayFeeV1InnerServiceSMO payFeeV1InnerServiceSMOImpl;
+
+    @Autowired
+    private IPayFeeDetailV1InnerServiceSMO payFeeDetailV1InnerServiceSMOImpl;
+
+    @Autowired
+    private IOwnerCarNewV1InnerServiceSMO ownerCarNewV1InnerServiceSMOImpl;
+
+    @Autowired
+    private IOwnerCarInnerServiceSMO ownerCarInnerServiceSMOImpl;
+
+    @Autowired
+    private IComputeFeeSMO computeFeeSMOImpl;
+
+    @Autowired
+    private IUserV1InnerServiceSMO userV1InnerServiceSMOImpl;
+
+
+    @Override
+    public void validate(CmdEvent event, ICmdDataFlowContext context, JSONObject reqJson) throws CmdException {
+
+        Assert.hasKey(reqJson, "fees", "请求报文中未包含费用信息");
+
+        JSONArray fees = reqJson.getJSONArray("fees");
+
+        JSONObject feeObject = null;
+
+        for (int feeIndex = 0; feeIndex < fees.size(); feeIndex++) {
+            feeObject = fees.getJSONObject(feeIndex);
+            Assert.hasKeyAndValue(feeObject, "feeId", "未包含费用信息");
+            Assert.hasKeyAndValue(feeObject, "startTime", "未包含开始时间");
+            Assert.hasKeyAndValue(feeObject, "endTime", "未包含结束时间");
+            Assert.hasKeyAndValue(feeObject, "receivedAmount", "未包含实收金额");
+        }
+    }
+
+    @Override
+    @Java110Transactional
+    public void doCmd(CmdEvent event, ICmdDataFlowContext dataFlowContext, JSONObject paramObj) throws CmdException, ParseException {
+        logger.info("======欠费缴费返回======：" + JSONArray.toJSONString(paramObj));
+        String userId = dataFlowContext.getReqHeaders().get("user-id");
+        UserDto userDto = new UserDto();
+        userDto.setUserId(userId);
+        List<UserDto> userDtos = userV1InnerServiceSMOImpl.queryUsers(userDto);
+        Assert.listOnlyOne(userDtos, "用户未登录");
+        //添加单元信息
+        List<FeeReceiptPo> feeReceiptPos = new ArrayList<>();
+        List<FeeReceiptDetailPo> feeReceiptDetailPos = new ArrayList<>();
+        JSONArray fees = paramObj.getJSONArray("fees");
+        JSONObject feeObj = null;
+        String appId = dataFlowContext.getReqHeaders().get("app-id");
+
+        for (int feeIndex = 0; feeIndex < fees.size(); feeIndex++) {
+            feeObj = fees.getJSONObject(feeIndex);
+            feeObj.put("communityId", paramObj.getString("communityId"));
+            if (paramObj.containsKey("oId")) {
+                feeObj.put("oId", paramObj.getString("oId"));
+            }
+            String remark = paramObj.getString("remark");
+            feeObj.put("remark", remark);
+            if (!feeObj.containsKey("primeRate") && AppDto.OWNER_WECHAT_PAY.equals(appId)) {  //微信公众号支付
+                feeObj.put("primeRate", "5");
+                feeObj.put("remark", "线上公众号支付");
+            }
+
+            //todo 去缴费
+            getFeeReceiptDetailPo(dataFlowContext, feeObj, feeReceiptDetailPos, feeReceiptPos, userDtos.get(0));
+        }
+
+        //这里只是写入 收据表，暂不考虑 事务一致性问题，就算写入失败 也只是影响 收据打印，如果 贵公司对 收据要求 比较高，不能有失败的情况 请加入事务管理
+//        feeReceiptDetailInnerServiceSMOImpl.saveFeeReceiptDetails(feeReceiptDetailPos);
+//
+//        feeReceiptInnerServiceSMOImpl.saveFeeReceipts(feeReceiptPos);
+
+        //根据明细ID 查询收据信息
+        List<String> detailIds = new ArrayList<>();
+
+        for (FeeReceiptDetailPo feeReceiptDetailPo : feeReceiptDetailPos) {
+            detailIds.add(feeReceiptDetailPo.getDetailId());
+        }
+
+        FeeReceiptDetailDto feeReceiptDetailDto = new FeeReceiptDetailDto();
+        feeReceiptDetailDto.setDetailIds(detailIds.toArray(new String[detailIds.size()]));
+        feeReceiptDetailDto.setCommunityId(paramObj.getString("communityId"));
+        try {
+            Thread.currentThread().sleep(2000);
+        } catch (InterruptedException ie) {
+            ie.printStackTrace();
+        }
+        List<FeeReceiptDetailDto> feeReceiptDetailDtos = feeReceiptDetailInnerServiceSMOImpl.queryFeeReceiptDetails(feeReceiptDetailDto);
+
+
+        dataFlowContext.setResponseEntity(ResultVo.createResponseEntity(feeReceiptDetailDtos));
+    }
+
+    private void getFeeReceiptDetailPo(ICmdDataFlowContext dataFlowContext, JSONObject paramObj,
+                                       List<FeeReceiptDetailPo> feeReceiptDetailPos,
+                                       List<FeeReceiptPo> feeReceiptPos,
+                                       UserDto userDto) {
+        int flag = 0;
+        if (!paramObj.containsKey("primeRate")) {
+            paramObj.put("primeRate", "6");
+        }
+        String appId = dataFlowContext.getReqHeaders().get("app-id");
+        logger.info("======支付方式======：" + appId + "+======+" + paramObj.containsKey("primeRate") + "======:" + JSONArray.toJSONString(dataFlowContext));
+        if (AppDto.OWNER_WECHAT_PAY.equals(appId)
+                && FeeDetailDto.PRIME_REATE_WECHAT.equals(paramObj.getString("primeRate"))) {  //微信支付（欠费缴费无法区分小程序还是微信公众号）
+            paramObj.put("remark", "线上公众号支付");
+        } else if (AppDto.OWNER_WECHAT_PAY.equals(appId)
+                && FeeDetailDto.PRIME_REATE_WECHAT_APP.equals(paramObj.getString("primeRate"))) {
+            paramObj.put("remark", "线上小程序支付");
+        }
+        paramObj.put("state", "1400");
+        // todo 添加交费明细
+        addOweFeeDetail(paramObj, dataFlowContext, feeReceiptDetailPos, feeReceiptPos, userDto);
+        modifyOweFee(paramObj, dataFlowContext);
+
+        //修改车辆
+        updateCarEndTime(paramObj);
+
+        //判断是否有派单属性ID
+        FeeAttrDto feeAttrDto = new FeeAttrDto();
+        feeAttrDto.setCommunityId(paramObj.getString("communityId"));
+        feeAttrDto.setFeeId(paramObj.getString("feeId"));
+        feeAttrDto.setSpecCd(FeeAttrDto.SPEC_CD_REPAIR);
+        List<FeeAttrDto> feeAttrDtos = feeAttrInnerServiceSMOImpl.queryFeeAttrs(feeAttrDto);
+
+    }
+
+    /**
+     * 修改费用信息
+     *
+     * @param paramInJson     接口调用放传入入参
+     * @param dataFlowContext 数据上下文
+     * @return 订单服务能够接受的报文
+     */
+    public void modifyOweFee(JSONObject paramInJson, ICmdDataFlowContext dataFlowContext) {
+
+        JSONObject businessFee = new JSONObject();
+        FeeDto feeInfo = (FeeDto) paramInJson.get("feeInfo");
+        Map feeMap = BeanConvertUtil.beanCovertMap(feeInfo);
+        feeMap.put("startTime", DateUtil.getFormatTimeString(feeInfo.getStartTime(), DateUtil.DATE_FORMATE_STRING_A));
+        feeMap.put("endTime", paramInJson.getString("endTime"));
+        feeMap.put("cycles", paramInJson.getString("cycles"));
+        feeMap.put("configEndTime", feeInfo.getConfigEndTime());
+        if (FeeDto.FEE_FLAG_ONCE.equals(feeInfo.getFeeFlag())) { //缴费结束
+            feeMap.put("state", FeeDto.STATE_FINISH);
+        }
+        Date maxEndTime = feeInfo.getConfigEndTime();
+        if (!FeeDto.FEE_FLAG_CYCLE.equals(feeInfo.getFeeFlag())) {
+            maxEndTime = feeInfo.getDeadlineTime();
+        }
+        if (maxEndTime != null) { //这里数据问题的情况下
+            Date endTime = DateUtil.getDateFromStringA(paramInJson.getString("endTime"));
+            if (endTime.getTime() >= maxEndTime.getTime()) {
+                feeMap.put("state", FeeDto.STATE_FINISH);
+            }
+        }
+
+        businessFee.putAll(feeMap);
+        PayFeePo payFeePo = BeanConvertUtil.covertBean(businessFee, PayFeePo.class);
+        int flag = payFeeV1InnerServiceSMOImpl.updatePayFee(payFeePo);
+        if (flag < 1) {
+            throw new CmdException("修改失败");
+        }
+    }
+
+    public void addOweFeeDetail(JSONObject paramInJson, ICmdDataFlowContext dataFlowContext,
+                                List<FeeReceiptDetailPo> feeReceiptDetailPos,
+                                List<FeeReceiptPo> feeReceiptPos,
+                                UserDto userDto) {
+
+        JSONObject businessFeeDetail = new JSONObject();
+        businessFeeDetail.putAll(paramInJson);
+        businessFeeDetail.put("detailId", GenerateCodeFactory.getGeneratorId(GenerateCodeFactory.CODE_PREFIX_detailId));
+        businessFeeDetail.put("primeRate", paramInJson.getString("primeRate"));
+        //计算 应收金额
+        FeeDto feeDto = new FeeDto();
+        feeDto.setFeeId(paramInJson.getString("feeId"));
+        feeDto.setCommunityId(paramInJson.getString("communityId"));
+        List<FeeDto> feeDtos = feeInnerServiceSMOImpl.queryFees(feeDto);
+        if (feeDtos == null || feeDtos.size() != 1) {
+            throw new ListenerExecuteException(ResponseConstant.RESULT_CODE_ERROR, "查询费用信息失败，未查到数据或查到多条数据");
+        }
+        if (!businessFeeDetail.containsKey("state") || StringUtil.isEmpty(businessFeeDetail.getString("state"))) {
+            businessFeeDetail.put("state", "1400");
+        }
+        feeDto = feeDtos.get(0);
+        businessFeeDetail.put("startTime", paramInJson.getString("startTime"));
+        BigDecimal cycles = null;
+        Map feePriceAll = computeFeeSMOImpl.getFeePrice(feeDto);
+        BigDecimal feePrice = new BigDecimal(feePriceAll.get("feePrice").toString());
+        Date endTime = feeDto.getEndTime();
+        Calendar endCalender = Calendar.getInstance();
+        endCalender.setTime(endTime);
+        BigDecimal receivedAmount = new BigDecimal(Double.parseDouble(paramInJson.getString("receivedAmount")));
+        cycles = receivedAmount.divide(feePrice, 4, BigDecimal.ROUND_HALF_EVEN);
+        businessFeeDetail.put("cycles", receivedAmount.divide(feePrice, 2, BigDecimal.ROUND_HALF_UP).doubleValue());
+
+        if (!paramInJson.containsKey("receivableAmount") || StringUtil.isEmpty(paramInJson.getString("receivableAmount"))) {
+            paramInJson.put("receivableAmount", paramInJson.getString("receivedAmount"));
+        }
+
+        businessFeeDetail.put("receivableAmount", paramInJson.getString("receivableAmount"));
+        businessFeeDetail.put("receivedAmount", paramInJson.getString("receivedAmount"));
+        businessFeeDetail.put("payableAmount", paramInJson.getString("receivedAmount"));
+        businessFeeDetail.put("endTime", paramInJson.getString("endTime"));
+        paramInJson.put("feeInfo", feeDto);
+        paramInJson.put("cycles", cycles.doubleValue());
+        PayFeeDetailPo payFeeDetailPo = BeanConvertUtil.covertBean(businessFeeDetail, PayFeeDetailPo.class);
+        if (paramInJson.containsKey("oId")) {
+            payFeeDetailPo.setPayOrderId(paramInJson.getString("oId"));
+        } else {
+            String oId = Java110TransactionalFactory.getOId();
+            if (StringUtil.isEmpty(oId)) {
+                oId = payFeeDetailPo.getDetailId();
+            }
+            payFeeDetailPo.setPayOrderId(oId);
+
+        }
+        payFeeDetailPo.setCashierId(userDto.getUserId());
+        payFeeDetailPo.setCashierName(userDto.getName());
+
+        int flag = payFeeDetailV1InnerServiceSMOImpl.savePayFeeDetailNew(payFeeDetailPo);
+
+        if (flag < 1) {
+            throw new CmdException("保存明细失败");
+        }
+
+        paramInJson.put("detailId", businessFeeDetail.getString("detailId"));
+        FeeReceiptPo feeReceiptPo = new FeeReceiptPo();
+        FeeReceiptDetailPo feeReceiptDetailPo = new FeeReceiptDetailPo();
+        feeReceiptDetailPo.setAmount(businessFeeDetail.getString("receivedAmount"));
+        feeReceiptDetailPo.setCommunityId(feeDto.getCommunityId());
+        feeReceiptDetailPo.setCycle(businessFeeDetail.getString("cycles"));
+        feeReceiptDetailPo.setDetailId(businessFeeDetail.getString("detailId"));
+        feeReceiptDetailPo.setEndTime(businessFeeDetail.getString("endTime"));
+        feeReceiptDetailPo.setFeeId(feeDto.getFeeId());
+        feeReceiptDetailPo.setFeeName(StringUtil.isEmpty(feeDto.getImportFeeName()) ? feeDto.getFeeName() : feeDto.getImportFeeName());
+        feeReceiptDetailPo.setStartTime(businessFeeDetail.getString("startTime"));
+        feeReceiptDetailPo.setReceiptId(GenerateCodeFactory.getGeneratorId(GenerateCodeFactory.CODE_PREFIX_receiptId));
+
+        computeFeeSMOImpl.freshFeeReceiptDetail(feeDto, feeReceiptDetailPo);
+        //查询业主信息
+        OwnerDto ownerDto = computeFeeSMOImpl.getFeeOwnerDto(feeDto);
+
+        feeReceiptDetailPos.add(feeReceiptDetailPo);
+        feeReceiptPo.setAmount(feeReceiptDetailPo.getAmount());
+        feeReceiptPo.setCommunityId(feeReceiptDetailPo.getCommunityId());
+        feeReceiptPo.setReceiptId(feeReceiptDetailPo.getReceiptId());
+        feeReceiptPo.setObjType(feeDto.getPayerObjType());
+        feeReceiptPo.setObjId(feeDto.getPayerObjId());
+        feeReceiptPo.setObjName(computeFeeSMOImpl.getFeeObjName(feeDto));
+        feeReceiptPo.setPayObjId(ownerDto.getOwnerId());
+        feeReceiptPo.setPayObjName(ownerDto.getName());
+        feeReceiptPos.add(feeReceiptPo);
+    }
+
+    private void updateCarEndTime(JSONObject paramObj) {
+        int flag;
+        FeeDto feeDto = new FeeDto();
+        feeDto.setFeeId(paramObj.getString("feeId"));
+        feeDto.setCommunityId(paramObj.getString("communityId"));
+        List<FeeDto> feeDtos = feeInnerServiceSMOImpl.queryFees(feeDto);
+
+        if (feeDtos == null || feeDtos.size() < 1) {
+            return;
+        }
+        if (!FeeDto.PAYER_OBJ_TYPE_CAR.equals(feeDtos.get(0).getPayerObjType())) {
+            return;
+        }
+        Date feeEndTime = feeDtos.get(0).getEndTime();
+        OwnerCarDto ownerCarDto = new OwnerCarDto();
+        ownerCarDto.setCommunityId(paramObj.getString("communityId"));
+        ownerCarDto.setCarId(feeDtos.get(0).getPayerObjId());
+        ownerCarDto.setCarTypeCd("1001"); //业主车辆
+        List<OwnerCarDto> ownerCarDtos = ownerCarInnerServiceSMOImpl.queryOwnerCars(ownerCarDto);
+
+        if (ownerCarDtos == null || ownerCarDtos.size() < 1) {
+            return;
+        }
+        //获取车位id
+        String psId = ownerCarDtos.get(0).getPsId();
+        //获取车辆状态(1001 正常状态，2002 欠费状态  3003 车位释放)
+        String carState = ownerCarDtos.get(0).getState();
+        if (!StringUtil.isEmpty(psId) && "3003".equals(carState)) {
+            ParkingSpaceDto parkingSpaceDto = new ParkingSpaceDto();
+            parkingSpaceDto.setPsId(psId);
+            List<ParkingSpaceDto> parkingSpaceDtos = parkingSpaceInnerServiceSMOImpl.queryParkingSpaces(parkingSpaceDto);
+            Assert.listOnlyOne(parkingSpaceDtos, "查询车位信息错误！");
+            //获取车位状态(出售 S，出租 H ，空闲 F)
+            String state = parkingSpaceDtos.get(0).getState();
+            if (!StringUtil.isEmpty(state) && !state.equals("F")) {
+                throw new IllegalArgumentException("车位已被使用，不能再缴费！");
+            }
+        }
+
+
+        Calendar endTimeCalendar = null;
+        //车位费用续租
+        for (OwnerCarDto tmpOwnerCarDto : ownerCarDtos) {
+            //后付费 或者信用期车辆 加一个月
+            if (FeeConfigDto.PAYMENT_CD_AFTER.equals(feeDtos.get(0).getPaymentCd())
+                    || OwnerCarDto.CAR_TYPE_CREDIT.equals(tmpOwnerCarDto.getCarType())) {
+                endTimeCalendar = Calendar.getInstance();
+                endTimeCalendar.setTime(feeEndTime);
+                endTimeCalendar.add(Calendar.MONTH, 1);
+                feeEndTime = endTimeCalendar.getTime();
+            }
+            if (tmpOwnerCarDto.getEndTime().getTime() >= feeEndTime.getTime()) {
+                continue;
+            }
+            OwnerCarPo ownerCarPo = new OwnerCarPo();
+            ownerCarPo.setMemberId(tmpOwnerCarDto.getMemberId());
+            ownerCarPo.setEndTime(DateUtil.getFormatTimeString(feeEndTime, DateUtil.DATE_FORMATE_STRING_A));
+            flag = ownerCarNewV1InnerServiceSMOImpl.updateOwnerCarNew(ownerCarPo);
+            if (flag < 1) {
+                throw new CmdException("缴费失败");
+            }
+        }
+    }
+
+}
